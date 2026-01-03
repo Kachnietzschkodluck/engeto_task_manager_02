@@ -5,8 +5,8 @@ import pymysql
 PRODUKCNI_DB = "task_manager_02_db"
 TEST_DB = "task_manager_02_test_db"
 
-# Vybraná databáze: "PRODUKCNÍ_DB" nebo "TEST_DB"
-DB_NAZEV = TEST_DB
+# Vybraná databáze: "PRODUKCNI_DB" nebo "TEST_DB"
+DB_NAZEV = PRODUKCNI_DB
 
 
 def pripojeni_db():
