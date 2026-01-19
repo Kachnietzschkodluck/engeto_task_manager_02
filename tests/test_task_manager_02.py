@@ -5,91 +5,112 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
 from task_manager_02_db import (
+    pripojeni_db,
     vytvoreni_tabulky,
     db_pridat_ukol,
-    db_ziskat_ukoly,
     db_aktualizovat_stav,
     db_odstranit_ukol,
-    db_smazat_vsechny_ukoly
+    db_smazat_vsechny_ukoly,
 )
 
+
 @pytest.fixture
-def test_db():
-    # zajistí, že tabulka existuje
-    vytvoreni_tabulky()
+def test_db_spojeni():
+    """Vytvoří připojení do test DB a po každém testu uklidí data."""
+    spojeni = pripojeni_db(test=True)
 
-    # před testem uklidíme
-    db_smazat_vsechny_ukoly()
+    # tabulka musí existovat
+    assert vytvoreni_tabulky(spojeni) is True
 
-    yield
+    # před testem uklidit
+    assert db_smazat_vsechny_ukoly(spojeni) is True
 
-    # po testu znovu uklidíme
-    db_smazat_vsechny_ukoly()
+    yield spojeni
 
-def test_pridani_ukolu(test_db):
-    db_pridat_ukol("Test úkol", "Popis testu")
+    # po testu uklidit
+    db_smazat_vsechny_ukoly(spojeni)
+    spojeni.close()
 
-    ukoly = db_ziskat_ukoly()
 
+def _select_all_ukoly(spojeni):
+    """Pomocný SELECT pro ověření dat v testech (nezávisle na db_ziskat_ukoly)."""
+    with spojeni.cursor() as cursor:
+        cursor.execute("SELECT id, nazev, popis, stav FROM ukoly ORDER BY id")
+        return cursor.fetchall()
+
+
+def test_pridani_ukolu_pozitivni(test_db_spojeni):
+    new_id = db_pridat_ukol(test_db_spojeni, "Test úkol", "Popis testu")
+    assert new_id is not None
+
+    ukoly = _select_all_ukoly(test_db_spojeni)
     assert len(ukoly) == 1
-    assert ukoly[0][1] == "Test úkol"
+    assert ukoly[0]["nazev"] == "Test úkol"
+    assert ukoly[0]["popis"] == "Popis testu"
+    assert ukoly[0]["stav"] == "Nezahájeno"
 
-def test_odstraneni_ukolu(test_db):
-    db_pridat_ukol("Mazací úkol", "Bude smazán")
 
-    ukoly = db_ziskat_ukoly()
-    ukol_id = ukoly[0][0]
-
-    db_odstranit_ukol(ukol_id)
-
-    ukoly_po = db_ziskat_ukoly()
-    assert len(ukoly_po) == 0
-
-def test_aktualizace_stavu(test_db):
-    db_pridat_ukol("Úkol k aktualizaci", "Popis úkolu")
-    
-    ukoly = db_ziskat_ukoly()
-    ukol_id = ukoly[0][0]
-
-    db_aktualizovat_stav(ukol_id, "Probíhá")
-
-    ukoly_po = db_ziskat_ukoly()
-    assert ukoly_po[0][3] == "Probíhá"
-
-def test_pridani_neplatneho_ukolu(test_db):
+def test_pridani_ukolu_negativni(test_db_spojeni):
     # prázdný název
-    db_pridat_ukol("", "Popis")
-    ukoly = db_ziskat_ukoly()
-    assert len(ukoly) == 0  # žádný úkol se neměl přidat
+    new_id = db_pridat_ukol(test_db_spojeni, "", "Popis")
+    assert new_id is None
 
     # prázdný popis
-    db_pridat_ukol("Název", "")
-    ukoly = db_ziskat_ukoly()
+    new_id2 = db_pridat_ukol(test_db_spojeni, "Název", "")
+    assert new_id2 is None
+
+    ukoly = _select_all_ukoly(test_db_spojeni)
     assert len(ukoly) == 0
 
-def test_aktualizace_neexistujiciho_id(test_db):
-    db_pridat_ukol("Existující úkol", "Popis")
-    ukoly = db_ziskat_ukoly()
-    existujici_id = ukoly[0][0]
 
-    # zkusíme ID, které neexistuje
-    neexistujici_id = existujici_id + 100
-    db_aktualizovat_stav(neexistujici_id, "Hotovo")
+def test_aktualizace_stavu_pozitivni(test_db_spojeni):
+    new_id = db_pridat_ukol(test_db_spojeni, "Úkol k aktualizaci", "Popis úkolu")
+    assert new_id is not None
 
-    # ujistíme se, že existující úkol zůstal nezměněn
-    ukoly_po = db_ziskat_ukoly()
-    assert ukoly_po[0][3] == "Nezahájeno"
+    ok = db_aktualizovat_stav(test_db_spojeni, new_id, "Probíhá")
+    assert ok is True
 
-def test_mazani_neexistujiciho_id(test_db):
-    db_pridat_ukol("Úkol k mazání", "Popis")
-    ukoly = db_ziskat_ukoly()
-    existujici_id = ukoly[0][0]
+    ukoly = _select_all_ukoly(test_db_spojeni)
+    assert len(ukoly) == 1
+    assert ukoly[0]["id"] == new_id
+    assert ukoly[0]["stav"] == "Probíhá"
 
-    # zkusíme ID, které neexistuje
-    neexistujici_id = existujici_id + 100
-    db_odstranit_ukol(neexistujici_id)
 
-    # ujistíme se, že existující úkol zůstal
-    ukoly_po = db_ziskat_ukoly()
-    assert len(ukoly_po) == 1
-    assert ukoly_po[0][0] == existujici_id
+def test_aktualizace_stavu_negativni_neexistujici_id(test_db_spojeni):
+    # do DB dáme jeden existující úkol
+    existujici_id = db_pridat_ukol(test_db_spojeni, "Existující úkol", "Popis")
+    assert existujici_id is not None
+
+    # zkusíme ID, které určitě neexistuje
+    ok = db_aktualizovat_stav(test_db_spojeni, existujici_id + 9999, "Hotovo")
+    assert ok is False
+
+    # ověř, že existující zůstal nezměněn
+    ukoly = _select_all_ukoly(test_db_spojeni)
+    assert len(ukoly) == 1
+    assert ukoly[0]["id"] == existujici_id
+    assert ukoly[0]["stav"] == "Nezahájeno"
+
+
+def test_odstraneni_ukolu_pozitivni(test_db_spojeni):
+    new_id = db_pridat_ukol(test_db_spojeni, "Mazací úkol", "Bude smazán")
+    assert new_id is not None
+
+    ok = db_odstranit_ukol(test_db_spojeni, new_id)
+    assert ok is True
+
+    ukoly = _select_all_ukoly(test_db_spojeni)
+    assert len(ukoly) == 0
+
+
+def test_odstraneni_ukolu_negativni_neexistujici_id(test_db_spojeni):
+    existujici_id = db_pridat_ukol(test_db_spojeni, "Úkol k mazání", "Popis")
+    assert existujici_id is not None
+
+    ok = db_odstranit_ukol(test_db_spojeni, existujici_id + 9999)
+    assert ok is False
+
+    # existující musí pořád být v DB
+    ukoly = _select_all_ukoly(test_db_spojeni)
+    assert len(ukoly) == 1
+    assert ukoly[0]["id"] == existujici_id

@@ -1,34 +1,40 @@
+import os
 import pymysql
+from dotenv import load_dotenv
 
-# --- KONFIGURACE ---
-# Zde nastav, kterou databázi chceš používat
-PRODUKCNI_DB = "task_manager_02_db"
-TEST_DB = "task_manager_02_test_db"
+load_dotenv()
 
-# Vybraná databáze: "PRODUKCNI_DB" nebo "TEST_DB"
-DB_NAZEV = PRODUKCNI_DB
+def pripojeni_db(test=False):
+    if test:
+        db_name = os.getenv("DB_NAME_TEST")
+    else:
+        db_name = os.getenv("DB_NAME_PROD")
 
+    if not db_name:
+        raise ValueError("Chybí DB_NAME_PROD / DB_NAME_TEST v .env")
 
-def pripojeni_db():
-    """Vytvoří připojení k MySQL databázi."""
-    try:
-        spojeni = pymysql.connect(
-            host='127.0.0.1',
-            user='root',
-            password='1111',
-            database=DB_NAZEV
-        )
-        return spojeni
-    except Exception as e:
-        print(f"Chyba při připojení: {e}")
-        return None
+    host = os.getenv("DB_HOST")
+    user = os.getenv("DB_USER")
+    password = os.getenv("DB_PASSWORD")
 
+    if not host or not user or password is None:
+        raise ValueError("Chybí DB_HOST / DB_USER / DB_PASSWORD v .env")
 
-def vytvoreni_tabulky():
+    return pymysql.connect(
+        host=host,
+        user=user,
+        password=password,
+        database=db_name,
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=False
+    )
+
+def vytvoreni_tabulky(spojeni):
     """Vytvoří tabulku 'ukoly', pokud ještě neexistuje."""
-    spojeni = pripojeni_db()
     if spojeni is None:
-        return
+        return False
+
     try:
         with spojeni.cursor() as cursor:
             sql = """
@@ -42,102 +48,169 @@ def vytvoreni_tabulky():
             """
             cursor.execute(sql)
         spojeni.commit()
+        return True
     except Exception as e:
+        spojeni.rollback()
         print(f"Chyba při vytváření tabulky: {e}")
-    finally:
-        spojeni.close()
+        return False
 
+def db_pridat_ukol(spojeni, nazev, popis):
+    """Přidá úkol do databáze.
 
-def db_pridat_ukol(nazev, popis):
-    """Přidá úkol do databáze."""
+    Parametry:
+        spojeni: aktivní DB connection (produkční nebo testovací)
+        nazev (str): název úkolu
+        popis (str): popis úkolu
+
+    Vrací:
+        int  - ID nově vloženého úkolu
+        None - pokud je vstup neplatný nebo nastala chyba
+    """
+    if spojeni is None:
+        return None
+
     nazev = nazev.strip()
     popis = popis.strip()
-    if not nazev or not popis:
-        print("Název a popis musí být vyplněny!")
-        return
-    if len(nazev) > 255:
-        print("Název nesmí být delší než 255 znaků!")
-        return
 
-    spojeni = pripojeni_db()
-    if spojeni is None:
-        return
+    if not nazev or not popis:
+        return None
+    if len(nazev) > 255:
+        return None
+
     try:
         with spojeni.cursor() as cursor:
             sql = "INSERT INTO ukoly (nazev, popis) VALUES (%s, %s)"
             cursor.execute(sql, (nazev, popis))
+            new_id = cursor.lastrowid
         spojeni.commit()
+        return new_id
     except Exception as e:
+        spojeni.rollback()
         print(f"Chyba při přidávání úkolu: {e}")
-    finally:
-        spojeni.close()
+        return None
 
+def db_ziskat_ukoly(spojeni, stavy=None):
+    """Vrátí seznam úkolů z DB, volitelně filtrovaný podle stavů.
 
-def db_ziskat_ukoly(stavy=None):
-    """Vrátí seznam úkolů, volitelně jen s vybranými stavy."""
-    spojeni = pripojeni_db()
+    Parametry:
+        spojeni: aktivní DB connection
+        stavy (list[str] | None): např. ["Nezahájeno", "Probíhá"]
+
+    Vrací:
+        list[dict]: seznam úkolů (DictCursor) nebo prázdný seznam
+    """
     if spojeni is None:
         return []
+
     try:
         with spojeni.cursor() as cursor:
             if stavy:
                 placeholders = ", ".join(["%s"] * len(stavy))
-                sql = f"SELECT id, nazev, popis, stav FROM ukoly WHERE stav IN ({placeholders}) ORDER BY id"
+                sql = f"""
+                    SELECT id, nazev, popis, stav, datum_vytvoreni
+                    FROM ukoly
+                    WHERE stav IN ({placeholders})
+                    ORDER BY id
+                """
                 cursor.execute(sql, stavy)
             else:
-                sql = "SELECT id, nazev, popis, stav FROM ukoly ORDER BY id"
+                sql = """
+                    SELECT id, nazev, popis, stav, datum_vytvoreni
+                    FROM ukoly
+                    ORDER BY id
+                """
                 cursor.execute(sql)
+
             return cursor.fetchall()
     except Exception as e:
         print(f"Chyba při získávání úkolů: {e}")
         return []
-    finally:
-        spojeni.close()
 
-
-def db_aktualizovat_stav(ukol_id, novy_stav):
-    """Aktualizuje stav konkrétního úkolu podle jeho ID."""
-    spojeni = pripojeni_db()
+def db_ukol_existuje(spojeni, ukol_id):
+    """Ověří, zda úkol s daným ID existuje."""
     if spojeni is None:
-        return
+        return False
+
+    try:
+        with spojeni.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM ukoly WHERE id = %s",
+                (ukol_id,)
+            )
+            return cursor.fetchone() is not None
+    except Exception as e:
+        print(f"Chyba při ověřování existence úkolu: {e}")
+        return False
+
+def db_aktualizovat_stav(spojeni, ukol_id, novy_stav):
+    """Aktualizuje stav úkolu podle ID.
+
+    Vrací:
+        True  - pokud úkol existuje a operace proběhla (i když se stav nezměnil)
+        False - pokud úkol neexistuje, stav je neplatný nebo nastala chyba
+    """
+    if spojeni is None:
+        return False
+
+    povolene_stavy = {"Probíhá", "Hotovo", "Nezahájeno"}
+    if novy_stav not in povolene_stavy:
+        return False
+
+    # 1) Nejdřív ověř, že ID existuje
+    if not db_ukol_existuje(spojeni, ukol_id):
+        return False
+
+    # 2) Pak teprve update
     try:
         with spojeni.cursor() as cursor:
             sql = "UPDATE ukoly SET stav = %s WHERE id = %s"
             cursor.execute(sql, (novy_stav, ukol_id))
         spojeni.commit()
+        return True
     except Exception as e:
+        spojeni.rollback()
         print(f"Chyba při aktualizaci úkolu: {e}")
-    finally:
-        spojeni.close()
+        return False
 
+def db_odstranit_ukol(spojeni, ukol_id):
+    """Odstraní úkol podle ID.
 
-def db_odstranit_ukol(ukol_id):
-    """Odstraní úkol podle ID."""
-    spojeni = pripojeni_db()
+    Vrací:
+        True  - pokud úkol existoval a byl odstraněn
+        False - pokud úkol s daným ID neexistuje nebo nastala chyba
+    """
     if spojeni is None:
-        return
+        return False
+
+    # 1) Ověření existence úkolu
+    if not db_ukol_existuje(spojeni, ukol_id):
+        return False
+
+    # 2) Smazání
     try:
         with spojeni.cursor() as cursor:
             sql = "DELETE FROM ukoly WHERE id = %s"
             cursor.execute(sql, (ukol_id,))
         spojeni.commit()
+        return True
     except Exception as e:
+        spojeni.rollback()
         print(f"Chyba při mazání úkolu: {e}")
-    finally:
-        spojeni.close()
+        return False
 
-
-def db_smazat_vsechny_ukoly():
-    """Smaže všechny úkoly z tabulky (pouze pro testy nebo lokální reset)."""
-    spojeni = pripojeni_db()
+def db_smazat_vsechny_ukoly(spojeni):
+    """Smaže všechny úkoly z tabulky.
+    Používá se pouze v testech nebo pro lokální reset.
+    """
     if spojeni is None:
-        return
+        return False
+
     try:
         with spojeni.cursor() as cursor:
             cursor.execute("DELETE FROM ukoly")
         spojeni.commit()
-        print("Všechny úkoly byly smazány.")
+        return True
     except Exception as e:
+        spojeni.rollback()
         print(f"Chyba při mazání všech úkolů: {e}")
-    finally:
-        spojeni.close()
+        return False
